@@ -1,0 +1,14 @@
+{
+  "dependencies": {
+    "adm-zip": "^0.5.17",
+    "docx": "^9.6.1",
+    "pdf-parse": "^2.4.5",
+    "pdfjs-dist": "^4.0.379",
+    "pdfkit": "^0.18.0",
+    "pptxgenjs": "^4.0.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-icons": "^5.7.0",
+    "sharp": "^0.35.3"
+  }
+}

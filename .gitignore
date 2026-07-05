@@ -1,0 +1,24 @@
+# Build output
+solar_defect
+*.o
+
+# Node.js
+node_modules/
+npm-debug.log*
+
+# Generated documents
+*.pptx
+*.docx
+*.pdf
+
+# Model files (keep only best_scaled.rknn)
+best.rknn
+best_fp16.rknn
+best_fp16_opt0.rknn
+best_noquant.rknn
+best_quant.rknn
+best_split.rknn
+
+# OS
+.DS_Store
+Thumbs.db
