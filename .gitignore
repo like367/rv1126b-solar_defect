@@ -5,6 +5,8 @@ solar_defect
 # Node.js
 node_modules/
 npm-debug.log*
+package.json
+package-lock.json
 
 # Generated documents
 *.pptx
@@ -18,6 +20,13 @@ best_fp16_opt0.rknn
 best_noquant.rknn
 best_quant.rknn
 best_split.rknn
+
+# Competition materials (keep local, not in repo)
+gen_ppt.js
+gen_docx.js
+gen_pdf.js
+_patch_v4l2.js
+竞赛报告全套材料.md
 
 # OS
 .DS_Store
