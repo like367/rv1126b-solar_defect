@@ -1251,7 +1251,7 @@ static int web_capture_pending(void) {
 
 /* ========== 类名数组(供solar_defect.c引用) ========== */
 static const char *g_web_cls_names[] = {
-    "bird-drop", "clean", "dusty", "electrical-damage", "physical-damage", "snow-covered"
+    "cover", "clean", "cover", "electrical", "physical", "cover"
 };
 
 #ifdef __cplusplus

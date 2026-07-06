@@ -309,12 +309,10 @@ static void ui_render_log_panel(uint32_t *fb,int fb_w){
 
         /* 类别着色 */
         uint32_t tc=COLOR_TEXT;
-        if(strstr(l->text,"bird-drop"))       tc=COLOR_RED;
-        else if(strstr(l->text,"dusty"))      tc=COLOR_YELLOW;
+        if(strstr(l->text,"cover"))       tc=COLOR_ORANGE;
         else if(strstr(l->text,"clean"))      tc=COLOR_GREEN;
         else if(strstr(l->text,"electrical")) tc=0x00FF44FF;
         else if(strstr(l->text,"physical"))   tc=0x0044FFFF;
-        else if(strstr(l->text,"snow"))       tc=COLOR_ORANGE;
         else if(strstr(l->text,"WARN"))       tc=COLOR_YELLOW;
         else if(strstr(l->text,"ERR"))        tc=COLOR_RED;
         else if(strstr(l->text,"Camera"))     tc=COLOR_ACCENT;
@@ -343,6 +341,8 @@ static void ui_render_overlay(uint32_t *fb,int fb_w){
 #define NUM_CLS  6
 #define IOU_THR  0.45f
 #define MAX_DETS 64
+static const char *g_cls_cn[NUM_CLS]={"cover","clean","cover",
+    "electrical","physical","cover"};
 #define SCR_W    1024
 #define SCR_H    600
 #define DRM_DEV  "/dev/dri/card0"
@@ -571,6 +571,8 @@ static void draw_image_rect(DRMDev *drm,unsigned char *rgb,int iw,int ih,
 }
 
 static uint32_t cls_color(int cls){
+    /* 0=cover, 1=clean, 2=cover, 3=electrical, 4=physical, 5=cover */
+    if(cls==0||cls==2||cls==5) return COLOR_ORANGE;
     uint32_t c[]={0x00FF4444,0x0044FF44,0x00FFFF44,0x00FF44FF,0x0044FFFF,0x00FF8844};
     return c[cls%6];
 }
@@ -653,26 +655,26 @@ static void _y_from_rgb(const unsigned char *rgb, unsigned char *y, int w, int h
 }
 
 /* ---- 自动白平衡 (灰世界法, 增益限幅防过曝) ---- */
-static void _auto_wb(unsigned char *rgb, int w, int h, double max_gain) {
+static void _auto_wb(unsigned char *rgb, int w, int h, int gain_q8) {
+    /* 整数自动白平衡: gain_q8 = gain * 256, e.g. 2.0 → 512 */
     int total = w * h;
-    double sum_r = 0, sum_g = 0, sum_b = 0;
+    long long sum_r = 0, sum_g = 0, sum_b = 0;
     for (int i = 0; i < total; i++) {
         unsigned char *p = rgb + i * 3;
         sum_r += p[0]; sum_g += p[1]; sum_b += p[2];
     }
-    double avg_g = sum_g / total;
-    if (avg_g < 1.0) return;
-    double avg_r = sum_r / total, avg_b = sum_b / total;
-    double gain_r = avg_g / avg_r;
-    double gain_b = avg_g / avg_b;
-    if (gain_r > max_gain) gain_r = max_gain;
-    if (gain_r < 1.0 / max_gain) gain_r = 1.0 / max_gain;
-    if (gain_b > max_gain) gain_b = max_gain;
-    if (gain_b < 1.0 / max_gain) gain_b = 1.0 / max_gain;
+    if (sum_g == 0) return;
+    /* fixed-point Q8 gains: gain = avg_g/avg_c * 256 */
+    int gr = (int)((sum_g << 8) / sum_r);  /* R gain * 256 */
+    int gb = (int)((sum_g << 8) / sum_b);  /* B gain * 256 */
+    if (gr > gain_q8) gr = gain_q8;
+    if (gr < (256 * 256 / gain_q8)) gr = (256 * 256 / gain_q8);
+    if (gb > gain_q8) gb = gain_q8;
+    if (gb < (256 * 256 / gain_q8)) gb = (256 * 256 / gain_q8);
     for (int i = 0; i < total; i++) {
         unsigned char *p = rgb + i * 3;
-        int r = (int)(p[0] * gain_r); p[0] = r > 255 ? 255 : (unsigned char)r;
-        int b = (int)(p[2] * gain_b); p[2] = b > 255 ? 255 : (unsigned char)b;
+        int r = (p[0] * gr) >> 8; p[0] = r > 255 ? 255 : (unsigned char)r;
+        int b = (p[2] * gb) >> 8; p[2] = b > 255 ? 255 : (unsigned char)b;
     }
 }
 
@@ -702,7 +704,7 @@ static void _y_smooth_edge(unsigned char *y, int w, int h, int thr) {
 static void _clahe_y(unsigned char *y, int w, int h) {
     int tw = w / CLAHE_TILES, th = h / CLAHE_TILES;
     unsigned char cdf[CLAHE_TILES][CLAHE_TILES][256];
-    int clip_val = (int)((float)(tw * th) / 256.0f * CLAHE_CLIP);
+    int clip_val = (tw * th * 10) / (256 * 4);  /* clahe_clip=2.5 → tw*th/256*2.5 ≈ tw*th*10/1024 */
 
     for (int ty = 0; ty < CLAHE_TILES; ty++) {
         for (int tx = 0; tx < CLAHE_TILES; tx++) {
@@ -729,24 +731,59 @@ static void _clahe_y(unsigned char *y, int w, int h) {
         }
     }
 
-    for (int yy = 0; yy < h; yy++) {
-        float fy = ((float)yy / th) - 0.5f;
-        int ty0 = (int)fy;
-        if (ty0 < 0) ty0 = 0;
-        int ty1 = ty0 + 1;
-        if (ty1 >= CLAHE_TILES) { ty1 = CLAHE_TILES - 1; ty0 = ty1 - 1; }
-        float yr = fy - ty0;
-        for (int xx = 0; xx < w; xx++) {
-            float fx = ((float)xx / tw) - 0.5f;
-            int tx0 = (int)fx;
-            if (tx0 < 0) tx0 = 0;
-            int tx1 = tx0 + 1;
-            if (tx1 >= CLAHE_TILES) { tx1 = CLAHE_TILES - 1; tx0 = tx1 - 1; }
-            float xr = fx - tx0;
-            int val = y[yy * w + xx];
-            float mapped = (1 - yr) * ((1 - xr) * cdf[ty0][tx0][val] + xr * cdf[ty0][tx1][val])
-                         + yr     * ((1 - xr) * cdf[ty1][tx0][val] + xr * cdf[ty1][tx1][val]);
-            y[yy * w + xx] = (unsigned char)(mapped > 255 ? 255 : (int)mapped);
+    /* 预计算行/列插值权重表 (定点整数, 避免逐像素float除法) */
+    unsigned char r_weight[th], c_weight[tw];
+    signed char   r_offset[th], c_offset[tw];
+
+    for (int i = 0; i < th; i++) {
+        int f = (i * 256) / th - 128;  /* (i/th - 0.5) * 256, range -128..127 */
+        if (f >= 0) {
+            r_offset[i] = 0;
+            r_weight[i] = (unsigned char)(255 - f);  /* (1-yr)*256 */
+        } else {
+            r_offset[i] = -1;
+            r_weight[i] = (unsigned char)(255 + f);  /* weight of ty-1 */
+        }
+    }
+    for (int i = 0; i < tw; i++) {
+        int f = (i * 256) / tw - 128;
+        if (f >= 0) {
+            c_offset[i] = 0;
+            c_weight[i] = (unsigned char)(255 - f);
+        } else {
+            c_offset[i] = -1;
+            c_weight[i] = (unsigned char)(255 + f);
+        }
+    }
+
+    /* 整数双线性插值 — tile嵌套循环, 零取模零除法 */
+    for (int by = 0; by < CLAHE_TILES; by++) {
+        for (int yy = 0; yy < th; yy++) {
+            int gy = by * th + yy;
+            int ty0 = by + r_offset[yy];
+            if (ty0 < 0) ty0 = 0;
+            int ty1 = ty0 + 1;
+            if (ty1 >= CLAHE_TILES) { ty1 = CLAHE_TILES - 1; ty0 = ty1 - 1; }
+            int wy0 = r_weight[yy] + 1, wy1 = 257 - wy0;
+            unsigned char *row = y + gy * w;
+
+            for (int bx = 0; bx < CLAHE_TILES; bx++) {
+                int tx0 = bx + c_offset[0];
+                if (tx0 < 0) tx0 = 0;
+                int tx1 = tx0 + 1;
+                if (tx1 >= CLAHE_TILES) { tx1 = CLAHE_TILES - 1; tx0 = tx1 - 1; }
+                unsigned char *cdf00 = cdf[ty0][tx0], *cdf01 = cdf[ty0][tx1];
+                unsigned char *cdf10 = cdf[ty1][tx0], *cdf11 = cdf[ty1][tx1];
+
+                for (int xx = 0; xx < tw; xx++) {
+                    int gx = bx * tw + xx;
+                    int wx0 = c_weight[xx] + 1, wx1 = 257 - wx0;
+                    int val = row[gx];
+                    int m = (wy0 * (wx0 * cdf00[val] + wx1 * cdf01[val])
+                          +  wy1 * (wx0 * cdf10[val] + wx1 * cdf11[val])) / 66049;
+                    row[gx] = (unsigned char)(m > 255 ? 255 : m);
+                }
+            }
         }
     }
 }
@@ -857,41 +894,90 @@ static void _usm_sharpen(unsigned char *rgb, const unsigned char *y, int w, int 
     free(blur);
 }
 
-/* ---- 完整管线入口 ---- */
-static void clahe_y(unsigned char *rgb, int w, int h) {
-    int total = w * h;
-    unsigned char *y = (unsigned char*)malloc(total);
-    if (!y) return;
+/* ---- CLAHE管线: 提取Y→CLAHE→降噪→柔混→比例缩放, 全整数保色 ---- */
+static unsigned char *g_clahe_ynew = NULL;
+static unsigned char *g_clahe_yold = NULL;
+static unsigned char *g_clahe_ytmp = NULL;
+static unsigned short g_recip[256];     /* y_old倒数 Q14 */
+static int g_recip_ok = 0;
 
-    _auto_wb(rgb, w, h, 2.0);                    /* 0. 自动白平衡 */
+static void _lrec_init(void) {
+    for (int i = 1; i < 256; i++) g_recip[i] = (unsigned short)((1 << 14) / i);
+    g_recip[0] = 0;
+    g_recip_ok = 1;
+}
 
-    _y_from_rgb(rgb, y, w, h);                  /* 1. RGB → Y */
-    _clahe_y(y, w, h);                          /* 2. CLAHE 8×8 clip=2.5 */
-    _y_smooth_edge(y, w, h, 10);                /* 3. 亮度保边降噪(thr=10, 强压制) */
-    _y_stretch(y, w, h, 0.008);                 /* 4. 0.8%对比度拉伸, 提升通透度 */
-
-    /* 5. Y → RGB比例缩放 */
-    for (int i = 0; i < total; i++) {
-        unsigned char *p = rgb + i * 3;
-        int y_old = (p[0] * 114 + p[1] * 587 + p[2] * 299) / 1000;
-        if (y_old == 0) continue;
-        double s = (double)y[i] / y_old;
-        for (int c = 0; c < 3; c++) {
-            int v = (int)(p[c] * s);
-            p[c] = v > 255 ? 255 : (unsigned char)v;
+/* 3×3 box blur (快速降噪, 纯整数) */
+static void _box3(unsigned char *d, int w, int h, unsigned char *tmp) {
+    /* 边界拷贝 */
+    for (int x = 0; x < w; x++) {
+        tmp[x] = d[x];
+        tmp[(h-1)*w + x] = d[(h-1)*w + x];
+    }
+    for (int y = 0; y < h; y++) {
+        tmp[y*w] = d[y*w];
+        tmp[y*w + w-1] = d[y*w + w-1];
+        unsigned char *row = d + y*w;
+        for (int x = 1; x < w-1; x++)
+            tmp[y*w+x] = row[x];
+    }
+    /* 3×3卷积核 */
+    for (int y = 1; y < h-1; y++) {
+        for (int x = 1; x < w-1; x++) {
+            int s = d[(y-1)*w+x-1] + d[(y-1)*w+x] + d[(y-1)*w+x+1]
+                  + d[ y   *w+x-1] + d[ y   *w+x] + d[ y   *w+x+1]
+                  + d[(y+1)*w+x-1] + d[(y+1)*w+x] + d[(y+1)*w+x+1];
+            tmp[y*w+x] = (unsigned char)((s + 4) / 9);
         }
     }
+}
 
-    _blur_uv(rgb, y, w, h);                     /* 6. UV自适应降噪(暗区2次,亮区1次) */
-    _usm_sharpen(rgb, y, w, h, 0.30);           /* 7. USM锐化(amount=0.3补强细裂纹) */
-    free(y);
+static void clahe_y(unsigned char *rgb, int w, int h) {
+    int total = w * h;
+    if (!g_clahe_ynew) {
+        g_clahe_ynew = (unsigned char*)malloc(total);
+        g_clahe_yold = (unsigned char*)malloc(total);
+        g_clahe_ytmp = (unsigned char*)malloc(total);
+        _lrec_init();
+    }
+    unsigned char *yn = g_clahe_ynew, *yo = g_clahe_yold, *yt = g_clahe_ytmp;
+    if (!yn || !yo || !yt) return;
+
+    /* 1. RGB → Y, 保存原始Y */
+    for (int i = 0; i < total; i++) {
+        unsigned char *p = rgb + i * 3;
+        int yv = (77*p[0] + 150*p[1] + 29*p[2] + 128) >> 8;
+        yo[i] = (unsigned char)yv;
+        yn[i] = (unsigned char)yv;
+    }
+
+    /* 2. CLAHE 增强Y局部对比度 */
+    _clahe_y(yn, w, h);
+
+    /* 3. 3×3 box blur 去除CLAHE高频噪点 */
+    _box3(yn, w, h, yt);
+    for (int i = 0; i < total; i++) yn[i] = yt[i];
+
+    /* 4. 柔混: 60% CLAHE + 40% 原始Y, 防过度增强 */
+    for (int i = 0; i < total; i++)
+        yn[i] = (unsigned char)((yn[i] * 6 + yo[i] * 4 + 5) / 10);
+
+    /* 5. RGB比例缩放 (等价于原始: rgb*c = rgb*c × y_new / y_old) */
+    for (int i = 0; i < total; i++) {
+        unsigned char *p = rgb + i * 3;
+        int y_old = yo[i], y_new = yn[i];
+        if (y_old <= 1) continue;
+        int s = y_new * g_recip[y_old];  /* Q14 ratio */
+        if (s <= (1 << 14)) continue;    /* 不降低亮度 */
+        int r = (p[0] * s) >> 14; p[0] = r > 255 ? 255 : (unsigned char)r;
+        int g = (p[1] * s) >> 14; p[1] = g > 255 ? 255 : (unsigned char)g;
+        int b = (p[2] * s) >> 14; p[2] = b > 255 ? 255 : (unsigned char)b;
+    }
 }
 
 /* ---- 推理线程 ---- */
 static void *infer_thread(void *arg){
     (void)arg;
-    const char *cls_names[]={"bird-drop","clean","dusty",
-                              "electrical-damage","physical-damage","snow-covered"};
     /* 本地缓冲区：防止采集线程覆盖队列缓冲区的竞态条件 */
     unsigned char *local_rgb=malloc(DST_W*DST_H*3);
     int black_frames=0;  /* 连续黑屏帧计数 */
@@ -1049,7 +1135,7 @@ static void *infer_thread(void *arg){
         for(int i=0;i<f.result.count&&i<5;i++){
             int ic=f.result.dets[i].cls;
             if(ic>=0&&ic<NUM_CLS){
-                char tmp[32];snprintf(tmp,sizeof(tmp),"%s%.1f",cls_names[ic],f.result.dets[i].score);
+                char tmp[32];snprintf(tmp,sizeof(tmp),"%s%.1f",g_cls_cn[ic],f.result.dets[i].score);
                 strncat(sig,tmp,sizeof(sig)-1);
             }
         }
@@ -1062,7 +1148,7 @@ static void *infer_thread(void *arg){
             else for(int i=0;i<f.result.count&&i<5;i++){
                 int ic=f.result.dets[i].cls;float sc=f.result.dets[i].score;
                 if(ic>=0&&ic<NUM_CLS){
-                    ui_log_add("%-17s %.2f",cls_names[ic],sc);
+                    ui_log_add("%-17s %.2f",g_cls_cn[ic],sc);
                     web_add_record(ic, sc);
                 }
             }
@@ -1071,7 +1157,7 @@ static void *infer_thread(void *arg){
         /* 更新面板巡检状态 */
         {
             float ax = g_servo.angle[0];
-            int pn = (ax < 30) ? 0 : (ax < 90) ? 1 : 2;
+            int pn = (ax < 50) ? 0 : (ax < 135) ? 1 : 2;
             int best_c;
             if (f.result.count > 0) {
                 best_c = f.result.dets[0].cls;
@@ -1093,14 +1179,14 @@ static void *infer_thread(void *arg){
                    g_cls_thr[3],g_cls_thr[4],g_cls_thr[5],
                    f.result.count);
             for(int i=0;i<f.result.count&&i<3;i++)
-                printf(" %s(%.2f)", cls_names[f.result.dets[i].cls], f.result.dets[i].score);
+                printf(" %s(%.2f)", g_cls_cn[f.result.dets[i].cls], f.result.dets[i].score);
             if(f.result.count==0){
                 /* 显示最高分(可能是clean误检) */
                 float top=-99;int tc=0;
                 for(int a=0;a<8400;a++)for(int c=0;c<NUM_CLS;c++){
                     float s=cls[c*8400+a]/100.0f;if(s>top){top=s;tc=c;}
                 }
-                if(top>0.2f)printf(" top=%s(%.2f)",cls_names[tc],top);
+                if(top>0.2f)printf(" top=%s(%.2f)",g_cls_cn[tc],top);
             }
             printf("\n");
         }
@@ -1178,6 +1264,29 @@ static void *display_thread(void *arg){
                             _fb_pixel(fb_back,SCR_W,bx2-t,yy,cc);
                         }
                     }
+                    /* 类名+置信度标签 (醒目填充背景) */
+                    int ic=d->cls;
+                    char label[48];
+                    const char *cn=(ic>=0&&ic<NUM_CLS)?g_cls_cn[ic]:"?";
+                    snprintf(label,sizeof(label),"%s %.2f",cn,d->score);
+                    int lx=bx1, ly=by1-FONT_H-4;
+                    if(ly<0){ly=by2+4;}
+                    int lw=(int)strlen(label)*FONT_W+6;
+                    int lh=FONT_H+4;
+                    /* 标签背景: 半透明深色填充矩形 */
+                    for(int yy=ly;yy<ly+lh&&yy<SCR_H;yy++){
+                        if(yy<0) continue;
+                        _fb_hline(fb_back,SCR_W,lx,yy,lw,0x00443333);
+                        _fb_hline(fb_back,SCR_W,lx+2,yy,lw-4,0x00882222);
+                    }
+                    /* 标签边框 (与检测框同色) */
+                    for(int t=0;t<1;t++){
+                        _fb_hline(fb_back,SCR_W,lx,ly,lw,cc);
+                        _fb_hline(fb_back,SCR_W,lx,ly+lh-1,lw,cc);
+                        _fb_pixel(fb_back,SCR_W,lx,ly+t,cc);
+                        _fb_pixel(fb_back,SCR_W,lx+lw-1,ly+t,cc);
+                    }
+                    ui_draw_text(fb_back,SCR_W,label,lx+3,ly+2,cc);
                 }
             }
         }
@@ -1329,9 +1438,9 @@ int main(){
     /* Servo */
     servo_init(&g_servo);
     /* 默认巡检面板角度: 0/30/60/90/120/150 度, 可在此修改 */
-    float scan_x[] = {0, 30, 60, 90, 120, 150};
-    float scan_y[] = {0, 0, 0, 0, 0, 0};
-    servo_scan_config(&g_servo, 6, scan_x, scan_y);
+    float scan_x[] = {0, 90, 175};
+    float scan_y[] = {0, 0, 0};
+    servo_scan_config(&g_servo, 3, scan_x, scan_y);
 
     /* DRM */
     if(drm_init(&g_drm)<0) return 1;
